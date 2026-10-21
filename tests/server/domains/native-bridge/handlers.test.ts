@@ -1,6 +1,42 @@
 import { parseJson } from '@tests/server/domains/shared/mock-factories';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { NativeBridgeHandlers } from '@server/domains/native-bridge/index';
+import {
+  ghidraBridgePing,
+  GhidraBridgeTcpError,
+} from '@server/domains/native-bridge/ghidra-bridge-tcp';
+import {
+  dispatchTcpAction,
+  tcpStatus,
+} from '@server/domains/native-bridge/ghidra-bridge-tcp-actions';
+
+// Partial mocks: keep the real GhidraBridgeTcpError class (the handler's
+// instanceof check distinguishes transport from argument errors) while
+// letting backend-routing tests script the TCP reachability and dispatch.
+vi.mock('@server/domains/native-bridge/ghidra-bridge-tcp', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  ghidraBridgePing: vi.fn(),
+}));
+vi.mock('@server/domains/native-bridge/ghidra-bridge-tcp-actions', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  dispatchTcpAction: vi.fn(),
+  tcpStatus: vi.fn(),
+}));
+
+// File-level defaults: every test starts with "no TCP bridge running" —
+// the same world the pre-TCP tests were written against. Individual tests
+// override these to script reachability.
+beforeEach(() => {
+  vi.mocked(ghidraBridgePing).mockRejectedValue(
+    new GhidraBridgeTcpError('bridge connection failed: ECONNREFUSED', 'connect'),
+  );
+  vi.mocked(tcpStatus).mockRejectedValue(
+    new GhidraBridgeTcpError('bridge connection failed: ECONNREFUSED', 'connect'),
+  );
+  vi.mocked(dispatchTcpAction).mockRejectedValue(
+    new Error('dispatchTcpAction not configured for this test'),
+  );
+});
 
 describe('NativeBridgeHandlers', () => {
   /* ── Constructor SSRF protection ──────────────────────────────────── */
@@ -158,10 +194,29 @@ describe('NativeBridgeHandlers', () => {
       expect(result.error).toContain('functionName');
     });
 
-    it('unknown action returns guide', async () => {
+    it('unknown action returns guide and reports failure', async () => {
+      // The guide is still emitted so the caller can see the real action
+      // list, but `success` must be false: auto mode routes every action the
+      // TCP backend does not map into this branch, and a `success: true` with
+      // no result would look like a completed call.
       const result = parseJson<any>(await handlers.handleGhidraBridge({ action: 'help' }));
+      expect(result.success).toBe(false);
+      expect(result.backend).toBe('http');
+      expect(result.reason).toContain('"help"');
       expect(result.guide).toBeDefined();
       expect(result.guide.actions).toBeInstanceOf(Array);
+    });
+
+    it('blames only http when the backend was pinned explicitly', async () => {
+      // Pinned to http, the TCP backend was never tried, so the error must not
+      // claim it was. Otherwise a caller who pinned the wrong backend is told
+      // to give up instead of switching.
+      const result = parseJson<any>(
+        await handlers.handleGhidraBridge({ action: 'help', backend: 'http' }),
+      );
+      expect(result.success).toBe(false);
+      expect(result.reason).toContain('Ghidra REST (http) backend');
+      expect(result.triedBackends).toBeUndefined();
     });
   });
 
@@ -556,6 +611,172 @@ describe('NativeBridgeHandlers', () => {
       expect(body.success).toBe(false);
       expect(body.error).toBe('bridge failed');
       expect(body.message).toBe('bridge failed');
+    });
+  });
+
+  /* ── Ghidra backend routing & TCP per-action fallback ─────────────── */
+
+  describe('ghidra backend routing & TCP per-action fallback', () => {
+    let handlers: NativeBridgeHandlers;
+
+    beforeEach(() => {
+      handlers = new NativeBridgeHandlers();
+      vi.mocked(ghidraBridgePing).mockReset();
+      vi.mocked(dispatchTcpAction).mockReset();
+      vi.mocked(tcpStatus).mockReset();
+    });
+
+    it('auto mode falls back to HTTP when the TCP backend does not map the action', async () => {
+      vi.mocked(ghidraBridgePing).mockResolvedValue(true);
+      vi.mocked(dispatchTcpAction).mockResolvedValue(undefined); // open_project: no TCP mapping
+      const fetchMock = vi.fn().mockResolvedValue({
+        status: 200,
+        json: () => Promise.resolve({ opened: true }),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const body = parseJson<any>(
+        await handlers.handleGhidraBridge({
+          action: 'open_project',
+          binaryPath: 'C:/bin/target.exe',
+        }),
+      );
+
+      expect(body.success).toBe(true);
+      expect(body.action).toBe('open_project');
+      // The REST bridge actually served the HTTP-only action.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/project/open');
+    });
+
+    it('auto mode names both backends when neither maps the action', async () => {
+      // Reachable TCP bridge declined the action, then the REST bridge hit its
+      // default branch too. The caller must not read this as "the other
+      // backend might work" — both were tried.
+      vi.mocked(ghidraBridgePing).mockResolvedValue(true);
+      vi.mocked(dispatchTcpAction).mockResolvedValue(undefined);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({ status: 200, json: () => Promise.resolve({}) }),
+      );
+
+      const body = parseJson<any>(await handlers.handleGhidraBridge({ action: 'help' }));
+
+      expect(body.success).toBe(false);
+      expect(body.triedBackends).toEqual(['ghidra-bridge-py', 'http']);
+      expect(body.reason).toContain('either Ghidra backend');
+    });
+
+    it('explicit ghidra-bridge-py reports unsupported for HTTP-only actions (no silent fallback)', async () => {
+      vi.mocked(dispatchTcpAction).mockResolvedValue(undefined);
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+
+      const body = parseJson<any>(
+        await handlers.handleGhidraBridge({
+          action: 'open_project',
+          binaryPath: 'C:/bin/target.exe',
+          backend: 'ghidra-bridge-py',
+        }),
+      );
+
+      expect(body.success).toBe(false);
+      expect(body.reason).toContain('not available on the pip ghidra_bridge TCP backend');
+      expect(body.fix).toContain('Ghidra GUI');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('argument errors on the TCP path carry no pip install fix (nothing to install)', async () => {
+      vi.mocked(dispatchTcpAction).mockRejectedValue(
+        new Error('functionName is required for decompile_function'),
+      );
+      vi.stubGlobal('fetch', vi.fn());
+
+      const body = parseJson<any>(
+        await handlers.handleGhidraBridge({
+          action: 'decompile_function',
+          backend: 'ghidra-bridge-py',
+        }),
+      );
+
+      expect(body.success).toBe(false);
+      expect(body.error).toContain('functionName');
+      expect(body.fix).toBeUndefined();
+    });
+
+    it('transport failures on the TCP path do carry the pip install fix', async () => {
+      vi.mocked(dispatchTcpAction).mockRejectedValue(
+        new GhidraBridgeTcpError('bridge connection failed: ECONNREFUSED', 'connect'),
+      );
+
+      const body = parseJson<any>(
+        await handlers.handleGhidraBridge({
+          action: 'list_functions',
+          backend: 'ghidra-bridge-py',
+        }),
+      );
+
+      expect(body.success).toBe(false);
+      expect(body.fix).toContain('pip install ghidra_bridge');
+    });
+
+    it('auto status reports both bridges in one call', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          status: 200,
+          json: () => Promise.resolve({ ok: true }),
+        }),
+      );
+      vi.mocked(tcpStatus).mockResolvedValue({
+        success: true,
+        action: 'status',
+        backend: 'ghidra-bridge-py',
+        reachable: true,
+      });
+
+      const body = parseJson<any>(await handlers.handleGhidraBridge({ action: 'status' }));
+
+      expect(body.backend).toBe('ghidra');
+      expect(body.available).toBe(true);
+      expect(body.tcpBackend).toMatchObject({ backend: 'ghidra-bridge-py', reachable: true });
+    });
+
+    it('auto status keeps reporting when the HTTP bridge throws and the TCP probe fails', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('http bridge down')));
+      vi.mocked(tcpStatus).mockRejectedValue(
+        new GhidraBridgeTcpError('bridge connection failed: ECONNREFUSED', 'connect'),
+      );
+
+      const body = parseJson<any>(await handlers.handleGhidraBridge({ action: 'status' }));
+
+      expect(body.available).toBe(false);
+      expect(body.tcpBackend).toMatchObject({ reachable: false });
+      expect(String(body.tcpBackend.reason)).toContain('ECONNREFUSED');
+    });
+
+    it('explicit http status stays HTTP-only (no TCP probe attached)', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          status: 200,
+          json: () => Promise.resolve({ ok: true }),
+        }),
+      );
+      vi.mocked(tcpStatus).mockResolvedValue({
+        success: true,
+        action: 'status',
+        backend: 'ghidra-bridge-py',
+        reachable: true,
+      });
+
+      const body = parseJson<any>(
+        await handlers.handleGhidraBridge({ action: 'status', backend: 'http' }),
+      );
+
+      expect(body.available).toBe(true);
+      expect(body.tcpBackend).toBeUndefined();
+      expect(vi.mocked(tcpStatus)).not.toHaveBeenCalled();
     });
   });
 });
