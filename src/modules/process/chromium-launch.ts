@@ -1,5 +1,4 @@
-/** Chromium-family heuristics for debug launch (issue #206).
- * Deliberately a filename-heuristic engine, not a known-good library:
+/** Chromium-family heuristics for debug launch (issue #206). Deliberately a filename-heuristic engine, not a known-good library:
  * we only test the executable's basename against a family-pattern list,
  * never paths or binary contents.
  */
@@ -9,15 +8,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const CHROMIUM_BASENAME_PATTERNS: RegExp[] = [
+  // Every pattern is fully anchored: it must match the entire basename.
   /^chrome(\.exe)?$/i,
+  /^chrome(-beta|-dev|-canary|sxs)?(\.exe)?$/i,
+  /^(google[ -]?chrome(-stable|-beta|-unstable)?|google-chrome\d+)?(\.exe)?$/i,
   /^chromium(-browser)?(\.exe)?$/i,
-  /^msedge(\.exe)?$/i,
-  /^brave(\.exe)?$/i,
-  /^vivaldi(\.exe)?$/i,
+  /^(msedge|new[ -]?msedge|Microsoft[ -]?Edge)(\.exe)?$/i,
+  /^(msedge|edge)\.(beta|dev|canary|sxs)(\.exe)?$/i,
+  /^brave(-browser)?(\.exe)?$/i,
+  /^vivaldi(-stable|-beta|-snapshot)?(\.exe)?$/i,
   /^opera(\.exe)?$/i,
   /^electron(\.exe)?$/i,
-  /^msedge\.beta|msedge\.dev|msedge\.sxs$/i,
-  /^chrome(-beta|-dev|-canary|sxs)?(\.exe)?$/i,
 ];
 
 /** True when the executable basename looks like a Chromium-family binary. */

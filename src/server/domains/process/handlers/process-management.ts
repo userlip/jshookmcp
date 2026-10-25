@@ -460,6 +460,8 @@ export class ProcessManagementHandlers implements MemoryOperationHost {
         };
       }
 
+      const debugPortSupported = isChromiumLikeExecutable(executablePath);
+
       return {
         content: [
           {
@@ -473,8 +475,10 @@ export class ProcessManagementHandlers implements MemoryOperationHost {
                   path: process.executablePath,
                 },
                 debugPort,
-                debugPortSupported: isChromiumLikeExecutable(executablePath),
-                attachUrl: `http://localhost:${debugPort}`,
+                debugPortSupported,
+                // Only advertise an attach endpoint when the launch actually
+                // enabled a debug port (Chromium-family targets only).
+                attachUrl: debugPortSupported ? `http://localhost:${debugPort}` : null,
               },
               null,
               2,

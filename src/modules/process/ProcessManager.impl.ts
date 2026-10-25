@@ -14,7 +14,10 @@ import {
 import { ScriptLoader } from '@native/ScriptLoader';
 import { BrowserDiscovery, type BrowserInfo } from '@modules/browser/BrowserDiscovery';
 import { findChromiumProcessesWithConfig } from '@modules/process/ProcessManager.chromium';
-import { buildChromiumDebugLaunch } from '@modules/process/chromium-launch';
+import {
+  buildChromiumDebugLaunch,
+  isChromiumLikeExecutable,
+} from '@modules/process/chromium-launch';
 import {
   DEFAULT_CHROMIUM_CONFIG,
   type ChromiumProcess,
@@ -399,9 +402,44 @@ export class ProcessManager {
       const childPid = child.pid || 0;
       const executableName = executablePath.split(/[\\/]/).pop() || 'unknown';
 
-      // Fast-fail: a target that dies immediately (e.g. rejected the debug
-      // flag or failed to start) must not burn the full 10s poll window.
-      if (typeof child.exitCode === 'number' || typeof child.signalCode === 'string') {
+      /** True when the child process has terminated. */
+      const childExited = () =>
+        typeof child.exitCode === 'number' || typeof child.signalCode === 'string';
+
+      /**
+       * Some Electron/Chrome builds fork a real browser process and the
+       * launcher exits right away — check for a listener on the debug port
+       * before treating a launcher exit as failure. Only trust a listener
+       * whose owning process matches the target we just spawned.
+       */
+      const adoptListener = async (): Promise<ProcessInfo | null> => {
+        const debugPid = await this.findPidByListeningPort(debugPort);
+        if (!debugPid || debugPid <= 0) return null;
+        const listener = await this.getProcessByPid(debugPid);
+        if (listener?.executablePath && isChromiumLikeExecutable(listener.executablePath)) {
+          return listener;
+        }
+        return {
+          pid: debugPid,
+          name: listener?.name ?? executableName,
+          executablePath: listener?.executablePath ?? executablePath,
+        };
+      };
+
+      // Fast-fail: a target that dies immediately without ever opening the
+      // debug port (e.g. rejected the debug flag or failed to start) must
+      // not burn the full 10s poll window. A launcher that forked a child
+      // which opened the port is a success, not a failure.
+      if (childExited()) {
+        const adopted = await adoptListener();
+        if (adopted) {
+          logger.info(`Launcher exited but debug port ${debugPort} is live:`, {
+            launcherPid: child.pid,
+            resolvedPid: adopted.pid,
+            executable: executablePath,
+          });
+          return adopted;
+        }
         logger.error(`Debug launch target exited immediately: ${executablePath}`, {
           exitCode: child.exitCode,
           signalCode: child.signalCode,
@@ -409,16 +447,41 @@ export class ProcessManager {
         return null;
       }
 
+      // Non-Chromium targets get no debug flag, so port polling is pointless
+      // and would risk adopting an unrelated listener — return the spawn as-is.
+      if (!plan.chromiumLike) {
+        const process = childPid > 0 ? await this.getProcessByPid(childPid) : null;
+        if (process) {
+          logger.info(`Launched process (debug port not supported):`, {
+            pid: child.pid,
+            executable: executablePath,
+          });
+          return process;
+        }
+        if (childPid > 0) {
+          return { pid: childPid, name: executableName, executablePath };
+        }
+        logger.error(`Failed to resolve spawned non-Chromium process: ${executablePath}`);
+        return null;
+      }
+
       // Some Electron apps fork quickly: poll a short window and prioritize
       // the PID that is actually listening on the requested debug port.
+      // Adopted listeners must belong to this launch: when the port is
+      // already held by another browser, the owning process's executable
+      // will not match the target we just spawned.
       let resolvedPid: number | null = childPid > 0 ? childPid : null;
       for (let attempt = 0; attempt < WIN_DEBUG_PORT_POLL_ATTEMPTS; attempt++) {
-        const debugPid = await this.findPidByListeningPort(debugPort);
-        if (debugPid && debugPid > 0) {
-          resolvedPid = debugPid;
-        }
-
-        if (typeof child.exitCode === 'number' || typeof child.signalCode === 'string') {
+        if (childExited()) {
+          const adopted = await adoptListener();
+          if (adopted) {
+            logger.info(`Launcher exited but debug port ${debugPort} is live:`, {
+              launcherPid: child.pid,
+              resolvedPid: adopted.pid,
+              executable: executablePath,
+            });
+            return adopted;
+          }
           logger.error(
             `Debug launch target exited before opening port ${debugPort}: ${executablePath}`,
             {
@@ -428,6 +491,20 @@ export class ProcessManager {
             },
           );
           return null;
+        }
+
+        const debugPid = await this.findPidByListeningPort(debugPort);
+        if (debugPid && debugPid > 0 && debugPid !== childPid) {
+          const listener = await this.getProcessByPid(debugPid);
+          // Owner process unknown (lookup failed): adopt with the spawn
+          // target's identity, matching pre-#207 fallback behavior.
+          if (
+            !listener ||
+            !listener.executablePath ||
+            isChromiumLikeExecutable(listener.executablePath)
+          ) {
+            resolvedPid = debugPid;
+          }
         }
 
         if (resolvedPid && resolvedPid > 0) {

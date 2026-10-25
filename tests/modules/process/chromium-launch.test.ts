@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { tmpdir } from 'node:os';
 import {
   buildChromiumDebugLaunch,
   isChromiumLikeExecutable,
@@ -14,6 +15,10 @@ describe('isChromiumLikeExecutable', () => {
       'C:/Users/x/AppData/Local/Vivaldi/Application/vivaldi.exe',
       '/Applications/Opera.app/Contents/MacOS/Opera',
       'C:/app/electron.exe',
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
+      '/snap/chromium/current/chrome-beta',
+      'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.canary.exe',
     ]) {
       expect(isChromiumLikeExecutable(path), path).toBe(true);
     }
@@ -33,6 +38,8 @@ describe('isChromiumLikeExecutable', () => {
   it('matches by basename only, ignoring path decoys', () => {
     expect(isChromiumLikeExecutable('C:/tools/chrome/decoder.exe')).toBe(false);
     expect(isChromiumLikeExecutable('C:/tools/java-chrome-plugin/java.exe')).toBe(false);
+    // Unanchored alternative would match substrings like these — must not.
+    expect(isChromiumLikeExecutable('C:/tools/my-msedge.dev-helper.exe')).toBe(false);
   });
 });
 
@@ -46,8 +53,10 @@ describe('buildChromiumDebugLaunch', () => {
     expect(plan.debugArgs[0]).toBe('--remote-debugging-port=9222');
     const udd = plan.debugArgs.find((a) => a.startsWith('--user-data-dir='));
     expect(udd).toBeDefined();
-    // user-data-dir must point somewhere outside the default profile dir
-    expect(udd).not.toBe('--user-data-dir=');
+    // The injected profile must live under the OS temp dir (never the
+    // browser's default profile — Chrome 136+ would ignore the debug port).
+    const injectedPath = udd!.slice('--user-data-dir='.length);
+    expect(injectedPath.startsWith(tmpdir().replace(/[\\/]+$/, ''))).toBe(true);
     expect(plan.debugArgs.slice(2)).toEqual(['--headless']);
   });
 

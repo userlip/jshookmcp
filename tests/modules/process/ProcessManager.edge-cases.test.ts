@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { DEFAULT_DEBUG_PORT } from '@src/constants';
 
 // Prevent setup.ts initRegistry from timing out when child_process is mocked
 vi.mock('@server/registry/index', () => ({
@@ -521,8 +522,8 @@ describe('ProcessManager — edge cases', () => {
       await pending;
 
       const spawnArgs = state.spawn.mock.calls[0]?.[1] as string[];
-      // Should include default port (Chromium-family target)
-      expect(spawnArgs[0]).toMatch(/--remote-debugging-port=\d+/);
+      // Should include the configured default port (Chromium-family target)
+      expect(spawnArgs[0]).toBe(`--remote-debugging-port=${DEFAULT_DEBUG_PORT}`);
       vi.useRealTimers();
     });
 

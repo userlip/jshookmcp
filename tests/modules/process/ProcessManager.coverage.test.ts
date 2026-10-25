@@ -245,13 +245,13 @@ describe('ProcessManager (Windows) - coverage expansion', () => {
       state.spawn.mockReturnValue(child);
       vi.spyOn(manager, 'getProcessByPid').mockResolvedValue(null);
 
-      const pending = manager.launchWithDebug('', 9222);
+      const pending = manager.launchWithDebug('C:/chrome.exe', 9222);
       await vi.runAllTimersAsync();
       const result = await pending;
       expect(result).toEqual({
         pid: 7000,
-        name: 'unknown',
-        executablePath: '',
+        name: 'chrome.exe',
+        executablePath: 'C:/chrome.exe',
       });
       vi.useRealTimers();
     });
