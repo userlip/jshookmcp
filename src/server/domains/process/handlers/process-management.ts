@@ -8,6 +8,7 @@
 import { logger } from '@utils/logger';
 import { argNumber, argStringArray } from '@server/domains/shared/parse-args';
 import { DEFAULT_DEBUG_PORT } from '@src/constants/server';
+import { isChromiumLikeExecutable } from '@modules/process/chromium-launch';
 import type { MemoryManager } from '@server/domains/shared/modules/native';
 import type { AuditEntry, MemoryOperationHost, ProcessHandlerDeps } from './shared-types';
 import {
@@ -472,6 +473,7 @@ export class ProcessManagementHandlers implements MemoryOperationHost {
                   path: process.executablePath,
                 },
                 debugPort,
+                debugPortSupported: isChromiumLikeExecutable(executablePath),
                 attachUrl: `http://localhost:${debugPort}`,
               },
               null,

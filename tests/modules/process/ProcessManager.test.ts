@@ -153,19 +153,24 @@ describe('ProcessManager', () => {
     const manager = new ProcessManager();
     vi.spyOn(manager, 'getProcessByPid').mockResolvedValue({
       pid: 5000,
-      name: 'app.exe',
-      executablePath: 'C:/app.exe',
+      name: 'chrome.exe',
+      executablePath: 'C:/chrome.exe',
     });
 
-    const pending = manager.launchWithDebug('C:/app.exe', 9222, []);
+    const pending = manager.launchWithDebug('C:/chrome.exe', 9222, []);
     await vi.runAllTimersAsync();
     const result = await pending;
 
-    expect(state.spawn).toHaveBeenCalledWith('C:/app.exe', ['--remote-debugging-port=9222'], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-    });
+    expect(state.spawn).toHaveBeenCalledTimes(1);
+    const [spawnPath, spawnArgs, spawnOpts] = state.spawn.mock.calls[0] as [
+      string,
+      string[],
+      unknown,
+    ];
+    expect(spawnPath).toBe('C:/chrome.exe');
+    expect(spawnOpts).toEqual({ detached: true, stdio: 'ignore', windowsHide: true });
+    expect(spawnArgs[0]).toBe('--remote-debugging-port=9222');
+    expect(spawnArgs.some((a) => a.startsWith('--user-data-dir='))).toBe(true);
     expect(result?.pid).toBe(5000);
 
     // Listener-PID lookup must be a syntactically valid PowerShell pipeline
@@ -173,6 +178,51 @@ describe('ProcessManager', () => {
     const [command, options] = state.execAsync.mock.calls[0] as [string, unknown];
     expect(command).toContain('-State Listen -ErrorAction SilentlyContinue Select-Object -First 1');
     expect(options).toEqual({ maxBuffer: PROCESS_EXEC_MAX_BUFFER_BYTES, windowsHide: true });
+    vi.useRealTimers();
+  });
+
+  it('launchWithDebug launches non-Chromium targets without debug flags', async () => {
+    vi.useFakeTimers();
+    state.spawn.mockReturnValue(createSpawnChild(6000));
+    state.execAsync.mockResolvedValue({
+      stdout: JSON.stringify({ OwningProcess: 6000 }),
+      stderr: '',
+    });
+    const manager = new ProcessManager();
+    vi.spyOn(manager, 'getProcessByPid').mockResolvedValue({
+      pid: 6000,
+      name: 'python.exe',
+      executablePath: 'C:/Python/python.exe',
+    });
+
+    const pending = manager.launchWithDebug('C:/Python/python.exe', 9222, ['script.py']);
+    await vi.runAllTimersAsync();
+    const result = await pending;
+
+    expect(state.spawn).toHaveBeenCalledWith('C:/Python/python.exe', ['script.py'], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    expect(result?.pid).toBe(6000);
+    vi.useRealTimers();
+  });
+
+  it('launchWithDebug fast-fails when the target exits during the port poll', async () => {
+    vi.useFakeTimers();
+    const child = createSpawnChild(7000);
+    child.exitCode = 1;
+    state.spawn.mockReturnValue(child);
+    const manager = new ProcessManager();
+
+    const pending = manager.launchWithDebug('C:/chrome.exe', 9222, []);
+    await vi.runAllTimersAsync();
+    const result = await pending;
+
+    expect(result).toBeNull();
+    // Fast-fail must avoid burning the full poll window: at most one
+    // listener lookup before noticing the exit.
+    expect(state.execAsync.mock.calls.length).toBeLessThanOrEqual(1);
     vi.useRealTimers();
   });
 

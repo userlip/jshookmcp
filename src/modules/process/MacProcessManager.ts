@@ -18,6 +18,7 @@ import {
 } from '@src/constants';
 import { ScriptLoader } from '@native/ScriptLoader';
 import { ProcessRegistry } from '@utils/ProcessRegistry';
+import { buildChromiumDebugLaunch } from '@modules/process/chromium-launch';
 import type { ProcessInfo, WindowInfo } from '@modules/process/ProcessManager';
 
 const execAsync = promisify(exec);
@@ -412,9 +413,9 @@ export class MacProcessManager {
     args: string[] = [],
   ): Promise<ProcessInfo | null> {
     try {
-      const debugArgs = [`--remote-debugging-port=${debugPort}`, ...args];
+      const plan = buildChromiumDebugLaunch(executablePath, debugPort, args);
 
-      const child = spawn(executablePath, debugArgs, {
+      const child = spawn(executablePath, plan.debugArgs, {
         detached: true,
         stdio: 'ignore',
       });
@@ -426,6 +427,15 @@ export class MacProcessManager {
 
       if (!child.pid) {
         logger.error(`Failed to spawn process: PID is undefined for ${executablePath}`);
+        return null;
+      }
+      // Fast-fail (issue #206): a target that died immediately must not be
+      // reported as a live debuggable process.
+      if (typeof child.exitCode === 'number' || typeof child.signalCode === 'string') {
+        logger.error(`Debug launch target exited immediately: ${executablePath}`, {
+          exitCode: child.exitCode,
+          signalCode: child.signalCode,
+        });
         return null;
       }
       const process = await this.getProcessByPid(child.pid);

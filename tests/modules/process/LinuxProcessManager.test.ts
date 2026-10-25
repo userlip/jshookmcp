@@ -123,14 +123,10 @@ describe('LinuxProcessManager', () => {
     await vi.runAllTimersAsync();
     const result = await pending;
 
-    expect(state.spawn).toHaveBeenCalledWith(
-      '/usr/bin/browser-bin',
-      ['--remote-debugging-port=9222', '--foo'],
-      {
-        detached: true,
-        stdio: 'ignore',
-      },
-    );
+    expect(state.spawn).toHaveBeenCalledWith('/usr/bin/browser-bin', ['--foo'], {
+      detached: true,
+      stdio: 'ignore',
+    });
     expect(result?.pid).toBe(444);
     vi.useRealTimers();
   });

@@ -516,12 +516,12 @@ describe('ProcessManager — edge cases', () => {
         executablePath: 'C:/app.exe',
       });
 
-      const pending = manager.launchWithDebug('C:/app.exe');
+      const pending = manager.launchWithDebug('C:/chrome.exe');
       await vi.runAllTimersAsync();
       await pending;
 
       const spawnArgs = state.spawn.mock.calls[0]?.[1] as string[];
-      // Should include default port
+      // Should include default port (Chromium-family target)
       expect(spawnArgs[0]).toMatch(/--remote-debugging-port=\d+/);
       vi.useRealTimers();
     });

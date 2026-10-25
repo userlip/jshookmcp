@@ -14,6 +14,7 @@ import {
 import { ScriptLoader } from '@native/ScriptLoader';
 import { BrowserDiscovery, type BrowserInfo } from '@modules/browser/BrowserDiscovery';
 import { findChromiumProcessesWithConfig } from '@modules/process/ProcessManager.chromium';
+import { buildChromiumDebugLaunch } from '@modules/process/chromium-launch';
 import {
   DEFAULT_CHROMIUM_CONFIG,
   type ChromiumProcess,
@@ -385,9 +386,9 @@ export class ProcessManager {
     args: string[] = [],
   ): Promise<ProcessInfo | null> {
     try {
-      const debugArgs = [`--remote-debugging-port=${debugPort}`, ...args];
+      const plan = buildChromiumDebugLaunch(executablePath, debugPort, args);
 
-      const child = spawn(executablePath, debugArgs, {
+      const child = spawn(executablePath, plan.debugArgs, {
         detached: true,
         stdio: 'ignore',
         windowsHide: true,
@@ -398,6 +399,16 @@ export class ProcessManager {
       const childPid = child.pid || 0;
       const executableName = executablePath.split(/[\\/]/).pop() || 'unknown';
 
+      // Fast-fail: a target that dies immediately (e.g. rejected the debug
+      // flag or failed to start) must not burn the full 10s poll window.
+      if (typeof child.exitCode === 'number' || typeof child.signalCode === 'string') {
+        logger.error(`Debug launch target exited immediately: ${executablePath}`, {
+          exitCode: child.exitCode,
+          signalCode: child.signalCode,
+        });
+        return null;
+      }
+
       // Some Electron apps fork quickly: poll a short window and prioritize
       // the PID that is actually listening on the requested debug port.
       let resolvedPid: number | null = childPid > 0 ? childPid : null;
@@ -405,6 +416,18 @@ export class ProcessManager {
         const debugPid = await this.findPidByListeningPort(debugPort);
         if (debugPid && debugPid > 0) {
           resolvedPid = debugPid;
+        }
+
+        if (typeof child.exitCode === 'number' || typeof child.signalCode === 'string') {
+          logger.error(
+            `Debug launch target exited before opening port ${debugPort}: ${executablePath}`,
+            {
+              exitCode: child.exitCode,
+              signalCode: child.signalCode,
+              attempt,
+            },
+          );
+          return null;
         }
 
         if (resolvedPid && resolvedPid > 0) {
