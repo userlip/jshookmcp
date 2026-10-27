@@ -28,6 +28,10 @@ import {
   CAPTCHA_HOOK_TIMEOUT_MAX_MS,
 } from '@src/constants';
 
+// Solvecha solves picture/text captchas only (no token tasks).
+const SOLVECHA_BASE_URL = 'https://api.solvecha.com';
+const SOLVECHA_IMAGE_ONLY_ERROR = 'Solvecha only solves image captchas';
+
 // ── Helpers ──
 
 function sleep(ms: number): Promise<void> {
@@ -58,7 +62,12 @@ function normalizeSolverMode(rawMode: unknown): SolverMode {
   const value = typeof rawMode === 'string' ? rawMode.toLowerCase() : '';
   if (value === 'hook') return 'hook';
   if (value === 'external_service') return 'external_service';
-  if (value === '2captcha' || value === 'anticaptcha' || value === 'capsolver') {
+  if (
+    value === '2captcha' ||
+    value === 'anticaptcha' ||
+    value === 'capsolver' ||
+    value === 'solvecha'
+  ) {
     return 'external_service';
   }
   return 'manual';
@@ -140,6 +149,9 @@ function getSolverBaseUrl(service: string): string {
   if (service === 'capsolver') {
     return readEnvNullableString('CAPTCHA_CAPSOLVER_BASE_URL', { trim: true }) || '';
   }
+  if (service === 'solvecha') {
+    return SOLVECHA_BASE_URL;
+  }
   return '';
 }
 
@@ -150,6 +162,9 @@ function mapProviderTaskKind(service: string, taskKind: SolverTaskKind): string 
     if (taskKind === 'hcaptcha') return 'HCaptchaTaskProxyless';
     if (taskKind === 'funcaptcha') return 'FunCaptchaTaskProxyless';
     if (taskKind === 'turnstile') return 'TurnstileTaskProxyless';
+    return 'ImageToTextTask';
+  }
+  if (service === 'solvecha') {
     return 'ImageToTextTask';
   }
   if (service === 'capsolver') {
@@ -164,7 +179,7 @@ function mapProviderTaskKind(service: string, taskKind: SolverTaskKind): string 
 }
 
 async function solveWithJsonTaskApi(
-  service: 'anticaptcha' | 'capsolver',
+  service: 'anticaptcha' | 'capsolver' | 'solvecha',
   apiKey: string,
   params: {
     taskKind: SolverTaskKind;
@@ -175,6 +190,9 @@ async function solveWithJsonTaskApi(
   timeoutMs: number,
 ): Promise<SolveResult> {
   const start = Date.now();
+  if (service === 'solvecha' && params.taskKind !== 'image') {
+    throw new Error(SOLVECHA_IMAGE_ONLY_ERROR);
+  }
   const baseUrl = getSolverBaseUrl(service);
   if (!baseUrl) {
     throw new Error(`${service} base URL is not configured.`);
@@ -208,33 +226,42 @@ async function solveWithJsonTaskApi(
   const createData = (await createRes.json()) as Record<string, unknown>;
   if ((createData.errorId as number | undefined) && createData.errorId !== 0) {
     throw new Error(
-      `${service} createTask failed: ${String(createData.errorCode ?? createData.errorDescription ?? JSON.stringify(createData))}`,
+      `${service} createTask failed: ${String(service === 'solvecha' ? (createData.errorDescription ?? createData.errorCode ?? JSON.stringify(createData)) : (createData.errorCode ?? createData.errorDescription ?? JSON.stringify(createData)))}`,
     );
   }
 
   const taskId = createData.taskId;
-  if (typeof taskId !== 'number' && typeof taskId !== 'string') {
+  // Solvecha may answer createTask with status "ready" and the solution inline.
+  const createdReady = service === 'solvecha' && createData.status === 'ready';
+  if (!createdReady && typeof taskId !== 'number' && typeof taskId !== 'string') {
     throw new Error(`${service} createTask did not return a taskId.`);
   }
 
+  let pendingCreateResult: Record<string, unknown> | null = createdReady ? createData : null;
   while (true) {
-    const elapsed = Date.now() - start;
-    if (elapsed >= timeoutMs) break;
-    await sleep(Math.min(CAPTCHA_POLL_INTERVAL_MS, timeoutMs - elapsed));
+    let resultData: Record<string, unknown>;
+    if (pendingCreateResult) {
+      resultData = pendingCreateResult;
+      pendingCreateResult = null;
+    } else {
+      const elapsed = Date.now() - start;
+      if (elapsed >= timeoutMs) break;
+      await sleep(Math.min(CAPTCHA_POLL_INTERVAL_MS, timeoutMs - elapsed));
 
-    const resultRes = await fetchWithTimeout(
-      `${baseUrl}/getTaskResult`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          clientKey: apiKey,
-          taskId,
-        }),
-      },
-      CAPTCHA_RESULT_TIMEOUT_MS,
-    );
-    const resultData = (await resultRes.json()) as Record<string, unknown>;
+      const resultRes = await fetchWithTimeout(
+        `${baseUrl}/getTaskResult`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            clientKey: apiKey,
+            taskId,
+          }),
+        },
+        CAPTCHA_RESULT_TIMEOUT_MS,
+      );
+      resultData = (await resultRes.json()) as Record<string, unknown>;
+    }
     if ((resultData.errorId as number | undefined) && resultData.errorId !== 0) {
       throw new Error(
         `${service} getTaskResult failed: ${String(resultData.errorCode ?? resultData.errorDescription ?? JSON.stringify(resultData))}`,
@@ -482,6 +509,10 @@ export async function handleCaptchaVisionSolve(
   const siteKey = argString(args, 'siteKey');
   const pageUrl = argString(args, 'pageUrl', '') || page.url();
 
+  if (mode === 'external_service' && externalService === 'solvecha' && taskKind !== 'image') {
+    return R.fail(SOLVECHA_IMAGE_ONLY_ERROR).build();
+  }
+
   // Widget solving needs a siteKey for external providers, but manual mode
   // delegates the solving to the user in-browser, so it may proceed without one.
   if (requiresWidgetContext(taskKind) && !siteKey && mode !== 'manual') {
@@ -599,7 +630,7 @@ export async function handleCaptchaVisionSolve(
   if (!apiKey) {
     return R.fail('External solver credentials are required. Set CAPTCHA_API_KEY.').build();
   }
-  if (!['2captcha', 'anticaptcha', 'capsolver'].includes(externalService)) {
+  if (!['2captcha', 'anticaptcha', 'capsolver', 'solvecha'].includes(externalService)) {
     return R.fail('Unsupported external solver service.').build();
   }
 
@@ -625,7 +656,7 @@ export async function handleCaptchaVisionSolve(
               timeoutMs,
             )
           : await solveWithJsonTaskApi(
-              externalService as 'anticaptcha' | 'capsolver',
+              externalService as 'anticaptcha' | 'capsolver' | 'solvecha',
               apiKey,
               {
                 taskKind,
@@ -685,6 +716,10 @@ export async function handleWidgetChallengeSolve(
   const taskKind = resolveTaskKind(args.taskKind, 'widget');
   const siteKey = argString(args, 'siteKey');
   const pageUrl = argString(args, 'pageUrl', '') || page.url();
+
+  if (mode === 'external_service' && externalService === 'solvecha') {
+    return R.fail(SOLVECHA_IMAGE_ONLY_ERROR).build();
+  }
 
   if (mode === 'hook') {
     if (!siteKey) {
@@ -762,7 +797,9 @@ export async function handleWidgetChallengeSolve(
             },
             timeoutMs,
           )
-        : externalService === 'anticaptcha' || externalService === 'capsolver'
+        : externalService === 'anticaptcha' ||
+            externalService === 'capsolver' ||
+            externalService === 'solvecha'
           ? await solveWithJsonTaskApi(
               externalService,
               apiKey,

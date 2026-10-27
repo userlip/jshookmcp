@@ -65,6 +65,8 @@ Clone 仓库后，在项目根目录创建 `.env` 文件（参考 `.env.example`
 | `CAPTCHA_MAX_RETRIES`        | CAPTCHA 最大求解重试次数。                 | `5`                                            |
 | `CAPTCHA_DEFAULT_RETRIES`    | CAPTCHA 默认求解重试次数。                 | `2`                                            |
 
+> `CAPTCHA_PROVIDER=solvecha` 是可选的仅图片验证码服务（图片与文字验证码，不支持 token 类任务），固定使用 `https://api.solvecha.com`，只需 `CAPTCHA_API_KEY`。文档：<https://solvecha.com/docs>。
+
 > `captcha_vision_solve` 和 `widget_challenge_solve` 现在采用显式参数模式。自动化调用时应显式提供 `taskKind`、`siteKey`、`imageBase64`、`callbackName`、`responseSelector`，而不是依赖页面特征自动探测。
 
 ### 2. 主程序身份与日志

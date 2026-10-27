@@ -65,6 +65,8 @@ Runtime configuration is defined by `src/utils/config.ts`. The current runtime d
 | `CAPTCHA_MAX_RETRIES`        | Maximum CAPTCHA solve retries.                      | `5`                                               |
 | `CAPTCHA_DEFAULT_RETRIES`    | Default CAPTCHA solve retries.                      | `2`                                               |
 
+> `CAPTCHA_PROVIDER=solvecha` is an optional image-only service (picture and text captchas, no token tasks). It uses `https://api.solvecha.com` and needs only `CAPTCHA_API_KEY`. Docs: <https://solvecha.com/docs>.
+
 > `captcha_vision_solve` and `widget_challenge_solve` are now explicit-input driven. Automated callers should pass `taskKind`, `siteKey`, `imageBase64`, `callbackName`, and `responseSelector` instead of relying on built-in page-signature probing.
 
 ### 2. Server identity and logging

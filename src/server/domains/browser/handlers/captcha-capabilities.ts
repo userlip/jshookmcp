@@ -80,6 +80,22 @@ function getJsonTaskProviderCapability(
   };
 }
 
+function getSolvechaCapability(): CapabilityEntryOptions {
+  const apiKeyConfigured = readEnvNullableString('CAPTCHA_API_KEY', { trim: true }) !== null;
+  return {
+    capability: 'captcha_external_service_solvecha',
+    status: apiKeyConfigured ? 'available' : 'unavailable',
+    reason: apiKeyConfigured ? undefined : 'solvecha requires CAPTCHA_API_KEY.',
+    fix: apiKeyConfigured ? undefined : 'Set CAPTCHA_API_KEY.',
+    details: {
+      tools: ['captcha_vision_solve'],
+      configuredProvider: getConfiguredProvider(),
+      imageOnly: true,
+      apiKeyConfigured,
+    },
+  };
+}
+
 async function getWidgetHookCapability(collector: CodeCollector): Promise<CapabilityEntryOptions> {
   let page;
   try {
@@ -144,6 +160,7 @@ export async function handleCaptchaSolverCapabilities(
         getTwoCaptchaCapability(),
         getJsonTaskProviderCapability('anticaptcha'),
         getJsonTaskProviderCapability('capsolver'),
+        getSolvechaCapability(),
         widgetHookCapability,
       ],
       {
